@@ -16,6 +16,7 @@ from sklearn.metrics import (
     f1_score,
     normalized_mutual_info_score,
 )  
+from scripts.utils_deep import nmi
 
 
 
@@ -55,177 +56,84 @@ def visualize_glmm(Ls, gamma_hats):
     plt.show()
     
 
-# def graph_learning_perf_eval(L_0, L):
-#     """
-#     Evaluates the performance of a learned graph by comparing it with the ground truth Laplacian matrix.
 
-#     Parameters:
-#     -----------
-#     L_0 : np.ndarray
-#         Ground truth Laplacian matrix of shape (n, n).
-    
-#     L : np.ndarray
-#         Learned Laplacian matrix of shape (n, n).
-
-#     Returns:
-#     --------
-#     precision : float
-#         Precision score of the learned graph.
-    
-#     recall : float
-#         Recall score of the learned graph.
-    
-#     f : float
-#         F1 score of the learned graph.
-    
-#     NMI_score : float
-#         Normalized Mutual Information score of the learned graph.
-    
-#     num_of_edges : int
-#         Number of edges in the learned graph.
-#     """
-#     # Edges in the ground truth graph
-#     L_0tmp = L_0 - np.diag(np.diag(L_0))
-#     L_0tmp = (L_0tmp + L_0tmp.T) / 2  
-#     edges_groundtruth = squareform(L_0tmp) != 0
-
-#     # Edges in the learned graph
-#     Ltmp = L - np.diag(np.diag(L))
-#     Ltmp = (Ltmp + Ltmp.T) / 2  
-#     edges_learned = squareform(Ltmp) != 0
-
-#     # Compute precision, recall, F1-score
-#     precision = precision_score(edges_groundtruth.astype(int), edges_learned.astype(int), zero_division=0)
-#     recall = recall_score(edges_groundtruth.astype(int), edges_learned.astype(int), zero_division=0)
-#     f = f1_score(edges_groundtruth.astype(int), edges_learned.astype(int), zero_division=0)
-
-#     # NMI
-#     NMI_score = normalized_mutual_info_score(edges_learned.astype(int), edges_groundtruth.astype(int))
-#     if np.isnan(NMI_score):
-#         NMI_score = 0
-
-#     # Number of edges in the learned graph
-#     num_of_edges = np.sum(edges_learned)
-
-#     return precision, recall, f, NMI_score, num_of_edges
 
 def graph_learning_perf_eval(L_0, L):
-    import numpy as np
-    from scipy.spatial.distance import squareform
-    from sklearn.metrics import normalized_mutual_info_score
-
-    # Edges in the ground truth graph
+    # Evaluate the performance of graph learning algorithms
     L_0tmp = L_0 - np.diag(np.diag(L_0))
-    edges_groundtruth = squareform(L_0tmp) != 0
+    edges_groundtruth = (squareform(L_0tmp) != 0)
 
-    # Edges in the learned graph
     Ltmp = L - np.diag(np.diag(L))
-    edges_learned = squareform(Ltmp) != 0
+    edges_learned = (squareform(Ltmp) != 0)
 
-    # Compute True Positives, False Positives, True Negatives, False Negatives
-    TP = np.sum((edges_learned == 1) & (edges_groundtruth == 1))
-    FP = np.sum((edges_learned == 1) & (edges_groundtruth == 0))
-    FN = np.sum((edges_learned == 0) & (edges_groundtruth == 1))
-    TN = np.sum((edges_learned == 0) & (edges_groundtruth == 0))
+    # Compute precision, recall
+    TP = np.sum(edges_learned & edges_groundtruth)
+    FP = np.sum(edges_learned & (~edges_groundtruth))
+    FN = np.sum((~edges_learned) & edges_groundtruth)
 
-    # Compute precision and recall from first principles
-    if TP + FP > 0:
-        precision = TP / (TP + FP)
-    else:
+    if (TP + FP) == 0:
         precision = 0.0
-
-    if TP + FN > 0:
-        recall = TP / (TP + FN)
     else:
+        precision = TP / (TP + FP)
+
+    if (TP + FN) == 0:
         recall = 0.0
-
-    # Compute F1 score
-    if precision + recall > 0:
-        f = 2 * precision * recall / (precision + recall)
     else:
+        recall = TP / (TP + FN)
+
+    # F-measure
+    if (precision + recall) == 0:
         f = 0.0
+    else:
+        f = 2 * precision * recall / (precision + recall)
 
     # NMI
-    NMI_score = normalized_mutual_info_score(edges_learned.astype(int), edges_groundtruth.astype(int))
+    # NMI expects labels or cluster assignments. We'll treat edges as binary labels.
+    # Using edges_learned and edges_groundtruth as binary arrays:
+    NMI_score = nmi(edges_learned.astype(int), edges_groundtruth.astype(int))
     if np.isnan(NMI_score):
         NMI_score = 0.0
 
-    # Number of edges in the learned graph
+    # number of edges in the learned graph
     num_of_edges = np.sum(edges_learned)
 
     return precision, recall, f, NMI_score, num_of_edges
 
-
 def identify_and_compare(Ls, Lap, gamma_hats, gamma_cut, k):
-    """
-    Identifies and compares clusters based on given Laplacian matrices and cluster assignments.
-
-    Parameters:
-    -----------
-    Ls : np.ndarray
-        Estimated Laplacian matrices of shape (n, n, k).
-    
-    Lap : np.ndarray
-        Ground truth Laplacian matrices of shape (n, n, k).
-    
-    gamma_hats : np.ndarray
-        Estimated cluster assignments of shape (m, k).
-    
-    gamma_cut : np.ndarray
-        Ground truth cluster assignments of shape (m, k).
-    
-    k : int
-        Number of clusters.
-
-    Returns:
-    --------
-    identify : np.ndarray
-        Indices of the identified clusters of shape (k,).
-    
-    precision : np.ndarray
-        Precision scores for each cluster of shape (k,).
-    
-    recall : np.ndarray
-        Recall scores for each cluster of shape (k,).
-    
-    f : np.ndarray
-        F1 scores for each cluster of shape (k,).
-    
-    cl_errors : np.ndarray
-        Clustering errors for each cluster of shape (k,).
-    
-    NMI_score : np.ndarray
-        Normalized Mutual Information scores for each cluster of shape (k,).
-    
-    num_of_edges : np.ndarray
-        Number of edges for each cluster of shape (k,).
-    """
     identify = np.zeros(k, dtype=int)
     cl_err = np.inf * np.ones(k)
-    precision = np.zeros(k)
-    recall = np.zeros(k)
-    f = np.zeros(k)
-    NMI_score = np.zeros(k)
-    num_of_edges = np.zeros(k)
+    NMI_scores = np.zeros(k)
+    num_of_edges_arr = np.zeros(k)
 
     for i in range(k):
         W = np.diag(np.diag(Ls[:, :, i])) - Ls[:, :, i]
         W[W < 0.001] = 0
         Ls[:, :, i] = np.diag(np.sum(W, axis=1)) - W
+        
         for j in range(k):
             er = np.linalg.norm(gamma_hats[:, i] - gamma_cut[:, j])
             if cl_err[i] > er:
                 cl_err[i] = er
                 identify[i] = j
 
+    precision = np.zeros((k, 1))
+    recall = np.zeros((k, 1))
+    f = np.zeros((k, 1))
+
+    # Now also compute NMI and num_of_edges for each cluster
     for i in range(k):
-        idx = identify[i]
-        precision[i], recall[i], f[i], NMI_score[i], num_of_edges[i] = graph_learning_perf_eval(Lap[:, :, idx], Ls[:, :, i])
+        p, r, ff, NMI_score, num_edges = graph_learning_perf_eval(Lap[:, :, identify[i]], Ls[:, :, i])
+        precision[i] = p
+        recall[i] = r
+        f[i] = ff
+        NMI_scores[i] = NMI_score
+        num_of_edges_arr[i] = num_edges
 
-    # Compute clustering errors
-    cl_errors = np.array([np.linalg.norm(gamma_hats[:, i] - gamma_cut[:, identify[i]])**2 for i in range(k)])
+    diff = gamma_hats - gamma_cut[:, identify]
+    cl_errors = np.diag(diff.T @ diff)
 
-    return identify, precision, recall, f, cl_errors, NMI_score, num_of_edges
+    # Return all requested values
+    return identify, precision, recall, f, cl_errors, NMI_scores, num_of_edges_arr
 
 
 
@@ -669,89 +577,225 @@ def prox_sum_log(x, gamma, param=None):
 
 
 
+# def gsp_distanz(X, Y=None, P=None):
+#     """
+#     gsp_distanz calculates the distances between all vectors in X and Y.
+
+#     Parameters
+#     ----------
+#     X : ndarray
+#         Matrix with column vectors (shape: d x n, where d is dimension and n is number of vectors).
+#     Y : ndarray, optional
+#         Matrix with column vectors (shape: d x m). Default is X.
+#     P : ndarray, optional
+#         Distance matrix (d x d). If given, computes distance under metric defined by P.
+
+#     Returns
+#     -------
+#     D : ndarray
+#         Distance matrix of size (n x m), where D[i,j] = distance between X[:,i] and Y[:,j].
+
+#     Notes
+#     -----
+#     This code computes:
+#         D = sqrt((X - Y)^T * P * (X - Y))
+
+#     If P is not provided, it assumes the standard Euclidean metric:
+#         D[i,j] = ||X[:,i] - Y[:,j]||_2
+
+#     If Y is not provided, Y = X and the diagonal of D is set to zero.
+#     """
+
+#     if X is None:
+#         raise ValueError("Not enough input parameters: X must be provided")
+
+#     # Default Y = X if not provided
+#     if Y is None:
+#         Y = X
+
+#     # Check dimensions
+#     rx, cx = X.shape
+#     ry, cy = Y.shape
+
+#     if rx != ry:
+#         raise ValueError("The sizes of X and Y do not match")
+
+#     # If P is not provided, use the standard Euclidean metric
+#     if P is None:
+#         # ||X||^2 for each vector in X
+#         xx = np.sum(X * X, axis=0)  # shape: (cx,)
+#         # ||Y||^2 for each vector in Y
+#         yy = np.sum(Y * Y, axis=0)  # shape: (cy,)
+#         # <X[:,i], Y[:,j]>
+#         xy = X.T @ Y  # shape: (cx, cy)
+
+#         # ||x - y||^2 = ||x||^2 + ||y||^2 - 2 <x,y>
+#         D = (xx[:, None] + yy[None, :] - 2 * xy)
+#     else:
+#         # Check P dimensions
+#         rp, rp2 = P.shape
+#         if rx != rp:
+#             raise ValueError("The sizes of X and P do not match")
+#         if rp2 != rp:
+#             raise ValueError("P must be square")
+
+#         # x^T P x for each vector in X
+#         xx = np.sum(X * (P @ X), axis=0)  # shape: (cx,)
+#         # y^T P y for each vector in Y
+#         yy = np.sum(Y * (P @ Y), axis=0)  # shape: (cy,)
+#         # x^T P y
+#         xy = X.T @ (P @ Y)  # shape: (cx, cy)
+#         # y^T P x (transpose of the above)
+#         yx = Y.T @ (P @ X)  # shape: (cy, cx)
+
+#         D = (xx[:, None] + yy[None, :] - xy - yx.T)
+
+#     # Check for negative values due to potential numerical issues
+#     if np.any(D < 0):
+#         # This warning matches the MATLAB warning
+#         print("Warning: gsp_distanz: P is not semipositive or X is not real!")
+
+#     # Take square root of distances
+#     D = np.sqrt(np.abs(D))
+
+#     # If Y = X, set diagonal to zero
+#     if Y is X:
+#         np.fill_diagonal(D, 0.0)
+        
+#     # min_val = D.min()
+#     # if min_val < -1e-12:
+#     #     print("Warning: gsp_distanz: P is not semipositive or X is not real!")
+#     D = np.sqrt(np.maximum(D, 0)) 
+
+#     return D
+
+
+# def gsp_distanz(X, Y=None, P=None):
+#     """
+#     gsp_distanz calculates the distances between all vectors in X and Y.
+
+#     Parameters
+#     ----------
+#     X : ndarray
+#         Matrix with column vectors (shape: d x n, where d is dimension and n is number of vectors).
+#     Y : ndarray, optional
+#         Matrix with column vectors (shape: d x m). Default is X.
+#     P : ndarray, optional
+#         Distance matrix (d x d). If given, computes distance under metric defined by P.
+
+#     Returns
+#     -------
+#     D : ndarray
+#         Distance matrix of size (n x m), where D[i,j] = distance between X[:,i] and Y[:,j].
+
+#     Notes
+#     -----
+#     This code computes:
+#         D = sqrt((X - Y)^T * P * (X - Y))
+
+#     If P is not provided, it assumes the standard Euclidean metric:
+#         D[i,j] = ||X[:,i] - Y[:,j]||_2
+
+#     If Y is not provided, Y = X and the diagonal of D is set to zero.
+
+#     This version aims to replicate the MATLAB code exactly, including warnings and steps.
+#     """
+
+#     if X is None:
+#         raise ValueError("Not enough input parameters: X must be provided")
+
+#     if Y is None:
+#         Y = X
+
+#     rx, cx = X.shape
+#     ry, cy = Y.shape
+
+#     if rx != ry:
+#         raise ValueError("The sizes of X and Y do not match")
+
+#     if P is None:
+#         # Euclidean metric
+#         xx = np.sum(X * X, axis=0)  # ||x||^2, shape (cx,)
+#         yy = np.sum(Y * Y, axis=0)  # ||y||^2, shape (cy,)
+#         xy = X.T @ Y  # <x,y>, shape (cx, cy)
+
+#         # ||x-y||^2 = ||x||^2 + ||y||^2 - 2<x,y>
+#         D = (xx[:, None] + yy[None, :] - 2*xy)
+#     else:
+#         rp, rp2 = P.shape
+#         if rx != rp:
+#             raise ValueError("The sizes of X and P do not match")
+#         if rp2 != rp:
+#             raise ValueError("P must be square")
+
+#         xx = np.sum(X * (P @ X), axis=0)  # x^T P x
+#         yy = np.sum(Y * (P @ Y), axis=0)  # y^T P y
+#         xy = X.T @ (P @ Y)                # x^T P y, shape (cx,cy)
+#         yx = Y.T @ (P @ X)                # y^T P x, shape (cy,cx)
+
+#         # In MATLAB: D = abs(repmat(xx',[1 cy]) + repmat(yy,[cx 1]) - xy - yx);
+#         # The code forms a matrix of pairwise distances squared.
+#         D = (xx[:, None] + yy[None, :] - xy - yx.T)
+
+#     # Check for negative values before taking abs(), just like MATLAB:
+#     # MATLAB checks if sum(D(:)<0), if so issues a warning.
+#     # Even if negatives are present, MATLAB code then takes abs(D).
+#     negative_count = np.sum(D < 0)
+#     if negative_count > 0:
+#         print("Warning: gsp_distanz: P is not semipositive or x is not real!")
+
+#     # Take absolute value before sqrt, just like MATLAB does abs(...) then sqrt(...)
+#     D = np.abs(D)
+#     D = np.maximum(D, 1e-14)  # or a suitably small epsilon
+
+#     # Take the square root
+#     D = np.sqrt(D)
+
+#     # If Y = X, set the diagonal to zero
+#     if Y is X:
+#         np.fill_diagonal(D, 0.0)
+
+#     return D
+
 def gsp_distanz(X, Y=None, P=None):
     """
-    gsp_distanz calculates the distances between all vectors in X and Y.
-
-    Parameters
-    ----------
-    X : ndarray
-        Matrix with column vectors (shape: d x n, where d is dimension and n is number of vectors).
-    Y : ndarray, optional
-        Matrix with column vectors (shape: d x m). Default is X.
-    P : ndarray, optional
-        Distance matrix (d x d). If given, computes distance under metric defined by P.
-
-    Returns
-    -------
-    D : ndarray
-        Distance matrix of size (n x m), where D[i,j] = distance between X[:,i] and Y[:,j].
-
-    Notes
-    -----
-    This code computes:
-        D = sqrt((X - Y)^T * P * (X - Y))
-
-    If P is not provided, it assumes the standard Euclidean metric:
-        D[i,j] = ||X[:,i] - Y[:,j]||_2
-
-    If Y is not provided, Y = X and the diagonal of D is set to zero.
+    Improved gsp_distanz that clamps values and adds a small epsilon.
     """
-
     if X is None:
         raise ValueError("Not enough input parameters: X must be provided")
 
-    # Default Y = X if not provided
     if Y is None:
         Y = X
 
-    # Check dimensions
     rx, cx = X.shape
     ry, cy = Y.shape
-
     if rx != ry:
-        raise ValueError("The sizes of X and Y do not match")
+        raise ValueError("The sizes of x and y do not fit!")
 
-    # If P is not provided, use the standard Euclidean metric
     if P is None:
-        # ||X||^2 for each vector in X
-        xx = np.sum(X * X, axis=0)  # shape: (cx,)
-        # ||Y||^2 for each vector in Y
-        yy = np.sum(Y * Y, axis=0)  # shape: (cy,)
-        # <X[:,i], Y[:,j]>
-        xy = X.T @ Y  # shape: (cx, cy)
-
-        # ||x - y||^2 = ||x||^2 + ||y||^2 - 2 <x,y>
-        D = (xx[:, None] + yy[None, :] - 2 * xy)
+        xx = np.sum(X*X, axis=0)
+        yy = np.sum(Y*Y, axis=0)
+        xy = X.T @ Y
+        D = xx[:,None] + yy[None,:] - 2*xy
     else:
-        # Check P dimensions
         rp, rp2 = P.shape
-        if rx != rp:
-            raise ValueError("The sizes of X and P do not match")
-        if rp2 != rp:
-            raise ValueError("P must be square")
+        if rx!=rp or rp!=rp2:
+            raise ValueError("P must be square and match dimension of X")
+        xx = np.sum(X*(P@X), axis=0)
+        yy = np.sum(Y*(P@Y), axis=0)
+        xy = X.T@(P@Y)
+        yx = Y.T@(P@X)
+        D = xx[:,None] + yy[None,:] - xy - yx.T
 
-        # x^T P x for each vector in X
-        xx = np.sum(X * (P @ X), axis=0)  # shape: (cx,)
-        # y^T P y for each vector in Y
-        yy = np.sum(Y * (P @ Y), axis=0)  # shape: (cy,)
-        # x^T P y
-        xy = X.T @ (P @ Y)  # shape: (cx, cy)
-        # y^T P x (transpose of the above)
-        yx = Y.T @ (P @ X)  # shape: (cy, cx)
+    # Add small eps before sqrt to avoid negative values due to round-off
+    eps = 1e-14
+    D = np.maximum(D, eps)
 
-        D = (xx[:, None] + yy[None, :] - xy - yx.T)
-
-    # Check for negative values due to potential numerical issues
+    # Check for negative values (unlikely now, but keep warning if needed)
     if np.any(D < 0):
-        # This warning matches the MATLAB warning
-        print("Warning: gsp_distanz: P is not semipositive or X is not real!")
+        print("Warning: gsp_distanz: P is not semipositive or x is not real!")
 
-    # Take square root of distances
-    D = np.sqrt(np.abs(D))
-
-    # If Y = X, set diagonal to zero
+    D = np.sqrt(D)
     if Y is X:
-        np.fill_diagonal(D, 0.0)
-
+        np.fill_diagonal(D,0.0)
     return D
