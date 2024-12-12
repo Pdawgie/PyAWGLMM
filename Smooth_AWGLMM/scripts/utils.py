@@ -9,6 +9,7 @@ from scipy.sparse.linalg import svds
 from numpy.linalg import eigvals  
 import numpy as np
 from scipy.sparse import csr_matrix, find, isspmatrix
+from scipy.sparse import issparse, csr_matrix
 from math import sqrt
 from sklearn.metrics import (
     precision_score,
@@ -16,10 +17,16 @@ from sklearn.metrics import (
     f1_score,
     normalized_mutual_info_score,
 )  
-from scripts.utils_deep import nmi
+from scripts.utils_deep import nmi , gsp_compute_theta_bounds
 
 
 
+def normalize_data(y):
+    # Standardize each feature to zero mean, unit variance
+    mean = np.mean(y, axis=0)
+    std = np.std(y, axis=0) + 1e-12
+    y_norm = (y - mean)/std
+    return y_norm
 
 def visualize_glmm(Ls, gamma_hats):
     k = gamma_hats.shape[1]
@@ -137,34 +144,104 @@ def identify_and_compare(Ls, Lap, gamma_hats, gamma_cut, k):
 
 
 
-def generate_connected_graph(n, p, zero_thresh):
-    """
-    Generates a connected Erdos-Renyi graph and returns its Laplacian matrix.
+# def generate_connected_graph(n, p, zero_thresh):
+#     """
+#     Generates a connected Erdos-Renyi graph and returns its Laplacian matrix.
 
-    Parameters:
-    -----------
+#     Parameters:
+#     -----------
+#     n : int
+#         Number of nodes in the graph.
+    
+#     p : float
+#         Probability for edge creation in the Erdos-Renyi graph.
+    
+#     zero_thresh : float
+#         Threshold for the second smallest eigenvalue of the Laplacian matrix
+#         to ensure graph connectivity.
+
+#     Returns:
+#     --------
+#     np.ndarray
+#         Laplacian matrix of the generated connected graph.
+#     """
+#     while True:
+#         g = nx.erdos_renyi_graph(n, p)
+#         L = nx.laplacian_matrix(g).toarray()
+#         eigs = np.sort(eigvals(L))
+#         if eigs[1] > zero_thresh:
+#             return L
+
+def generate_connected_graph(n, p, zero_thresh, maxit=10, verbose=1):
+    """
+    Generate a connected Erdos-Renyi graph using networkx and ensure 
+    its second smallest eigenvalue of Laplacian is > zero_thresh.
+
+    Parameters
+    ----------
     n : int
-        Number of nodes in the graph.
-    
+        Number of nodes.
     p : float
-        Probability for edge creation in the Erdos-Renyi graph.
-    
+        Probability of connection between nodes.
     zero_thresh : float
-        Threshold for the second smallest eigenvalue of the Laplacian matrix
-        to ensure graph connectivity.
+        Threshold for the second smallest eigenvalue to ensure connectivity.
+    maxit : int, optional
+        Maximum number of tries to get a connected graph (default 10).
+    verbose : int, optional
+        Verbosity level (default 1).
 
-    Returns:
-    --------
-    np.ndarray
-        Laplacian matrix of the generated connected graph.
+    Returns
+    -------
+    G_dict : dict
+        A dictionary mimicking the G structure with keys:
+        - 'W': adjacency/weight matrix
+        - 'L': Laplacian matrix
+        - 'N': number of nodes
+        - 'type': 'erdos_renyi'
+    
+    Raises
+    ------
+    ValueError
+        If after maxit attempts no connected graph is found.
     """
-    while True:
-        g = nx.erdos_renyi_graph(n, p)
-        L = nx.laplacian_matrix(g).toarray()
-        eigs = np.sort(eigvals(L))
-        if eigs[1] > zero_thresh:
-            return L
-        
+    for iteration in range(1, maxit+1):
+        # Generate an Erdos-Renyi graph
+        Gnx = nx.erdos_renyi_graph(n, p)
+        W = nx.to_numpy_array(Gnx, dtype=np.float64)
+
+        # Remove any self loops by zeroing diagonal
+        np.fill_diagonal(W, 0.0)
+
+        # Compute Laplacian
+        d = np.sum(W, axis=1)
+        D = np.diag(d)
+        L = D - W
+
+        # Compute eigenvalues
+        e = np.linalg.eigvalsh((L + L.T)*0.5)
+        e = np.sort(e)
+
+        # Check connectivity condition
+        if len(e) > 1 and e[1] > zero_thresh:
+            if verbose > 1:
+                print(f"A connected graph has been created in {iteration} iteration(s)")
+
+            G_dict = {}
+            G_dict['W'] = W
+            G_dict['L'] = L
+            G_dict['N'] = n
+            G_dict['type'] = 'erdos_renyi'
+            return G_dict
+        else:
+            if verbose > 1:
+                print(f"Iteration {iteration} failed. Trying again.")
+
+    if verbose:
+        print("Warning: The graph is not strongly connected after maxit attempts.")
+    raise ValueError("Could not generate a connected graph after maxit attempts.")
+
+
+
 def normest(S):
     """
     Estimate the 2-norm (largest singular value) of a sparse matrix S.
@@ -204,8 +281,6 @@ def lin_map(X, lims_out, lims_in=None):
 
 def squareform_sp(w):
     """
-    Sparse counterpart of MATLAB's squareform for sparse vectors or matrices.
-
     Parameters
     ----------
     w : array-like or sparse matrix
@@ -219,11 +294,6 @@ def squareform_sp(w):
     w_out : sparse matrix or sparse vector
         If input was vector, output is an n-by-n sparse matrix.
         If input was matrix, output is a sparse vector.
-
-    Notes
-    -----
-    This is a sparse adaptation of MATLAB's squareform function, with zero-based
-    indexing adjustments for Python.
     """
 
     # Convert input to a known sparse type if not already
@@ -231,7 +301,6 @@ def squareform_sp(w):
         density = np.count_nonzero(w)/w.size if w.size > 0 else 0
         if density > 1/10:
             # If too dense, fallback to dense squareform
-            from scipy.spatial.distance import squareform
             return squareform(w)
         else:
             w = csr_matrix(w)
@@ -378,101 +447,6 @@ def sum_squareform(n, mask=None):
 
 
 
-# def prox_sum_log(x, gamma, param=None):
-#     """
-#     Proximal operator of the log-barrier function - sum(log(x)).
-
-#     This function solves:
-#         sol = argmin_z (0.5 * ||x - z||_2^2 - gamma * sum(log(z)))
-
-#     Parameters
-#     ----------
-#     x : ndarray
-#         Input signal (vector or matrix).
-#     gamma : float
-#         Regularization parameter (gamma >= 0).
-#     param : dict, optional
-#         Parameter dictionary with fields:
-#         - verbose: int, default 1
-#             0: no output
-#             1: print -sum(log(x))
-#             2: additionally report number of negative elements in x
-
-#     Returns
-#     -------
-#     sol : ndarray
-#         The solution.
-#     info : dict
-#         Dictionary containing:
-#         - 'algo': str, name of the algorithm
-#         - 'iter': int, number of iterations (here 0 since closed-form)
-#         - 'time': float, execution time
-#         - 'final_eval': float, final evaluation of the chosen measure
-#         - 'crit': str, stopping criterion (here '--')
-
-#     Notes
-#     -----
-#     The formula for the solution is:
-#         sol = (x + sqrt(x^2 + 4*gamma)) / 2.
-
-#     The final_eval is computed as -gamma * sum(log(x)) according to the
-#     original MATLAB code, even though it might make more sense to evaluate
-#     the objective at sol. We keep this choice to remain consistent with the
-#     original code.
-
-#     See also:
-#     prox_l1, prox_l2, prox_tv, prox_sum_log_norm2
-#     """
-#     if param is None:
-#         param = {}
-#     verbose = param.get('verbose', 1)
-
-#     # Start timing
-#     t_start = time.time()
-
-#     # Check gamma
-#     if gamma < 0:
-#         raise ValueError("Gamma cannot be negative.")
-#     elif gamma == 0:
-#         # If gamma=0, solution is x and final_eval=0
-#         sol = x
-#         info = {
-#             'algo': 'prox_sum_log',
-#             'iter': 0,
-#             'final_eval': 0,
-#             'crit': '--',
-#             'time': time.time() - t_start
-#         }
-#         return sol, info
-
-#     # Ensure x is a numpy array
-#     x = np.asarray(x, dtype=float)
-
-#     # Compute the solution
-#     sol = (x + np.sqrt(x**2 + 4*gamma)) / 2.0
-
-#     # Prepare info dictionary
-#     info = {
-#         'algo': 'prox_sum_log',
-#         'iter': 0,
-#         'final_eval': -gamma * np.sum(np.log(x.ravel())),  # from original code
-#         'crit': '--',
-#         'time': time.time() - t_start
-#     }
-
-#     # Logging
-#     if verbose >= 1:
-#         val_per_gamma = info['final_eval'] / gamma  # = -sum(log(x))
-#         msg = f"  prox_sum_log: - sum(log(x)) = {val_per_gamma:e}"
-#         if verbose > 1:
-#             # count negative elements
-#             n_neg = np.count_nonzero(x <= 0)
-#             if n_neg > 0:
-#                 msg += f" ({n_neg} negative elements, log not defined, check stability)"
-#         print(msg)
-
-#     return sol, info
-
 def prox_sum_log(x, gamma, param=None):
     """
     Proximal operator of the log-barrier function - sum(log(x)).
@@ -507,14 +481,16 @@ def prox_sum_log(x, gamma, param=None):
 
     Notes
     -----
-    If x contains non-positive values, the log is not defined. We will print
-    a warning and set final_eval to inf in that case. This prevents NaN issues.
-
     The formula for the solution is:
         sol = (x + sqrt(x^2 + 4*gamma)) / 2.
 
-    We keep consistency with the original MATLAB code by using -gamma*sum(log(x))
-    as final_eval when possible.
+    The final_eval is computed as -gamma * sum(log(x)) according to the
+    original MATLAB code, even though it might make more sense to evaluate
+    the objective at sol. We keep this choice to remain consistent with the
+    original code.
+
+    See also:
+    prox_l1, prox_l2, prox_tv, prox_sum_log_norm2
     """
     if param is None:
         param = {}
@@ -544,130 +520,223 @@ def prox_sum_log(x, gamma, param=None):
     # Compute the solution
     sol = (x + np.sqrt(x**2 + 4*gamma)) / 2.0
 
-    # Check for non-positive values in x
-    if np.any(x <= 0):
-        final_eval = np.inf
-    else:
-        final_eval = -gamma * np.sum(np.log(x.ravel()))
-
     # Prepare info dictionary
     info = {
         'algo': 'prox_sum_log',
         'iter': 0,
-        'final_eval': final_eval,
+        'final_eval': -gamma * np.sum(np.log(x.ravel())),  # from original code
         'crit': '--',
         'time': time.time() - t_start
     }
 
     # Logging
     if verbose >= 1:
-        if np.isinf(final_eval):
-            msg = "  prox_sum_log: x contains non-positive values; - sum(log(x)) = inf"
-        else:
-            val_per_gamma = final_eval / gamma  # = -sum(log(x))
-            msg = f"  prox_sum_log: - sum(log(x)) = {val_per_gamma:e}"
+        val_per_gamma = info['final_eval'] / gamma  # = -sum(log(x))
+        msg = f"  prox_sum_log: - sum(log(x)) = {val_per_gamma:e}"
         if verbose > 1:
             # count negative elements
             n_neg = np.count_nonzero(x <= 0)
             if n_neg > 0:
-                msg += f" ({n_neg} negative or zero elements, log not defined, check stability)"
+                msg += f" ({n_neg} negative elements, log not defined, check stability)"
         print(msg)
 
     return sol, info
 
-
-
-# def gsp_distanz(X, Y=None, P=None):
+# def prox_sum_log(x, gamma, param=None):
 #     """
-#     gsp_distanz calculates the distances between all vectors in X and Y.
+#     Proximal operator of the log-barrier function - sum(log(x)).
+
+#     This function solves:
+#         sol = argmin_z (0.5 * ||x - z||_2^2 - gamma * sum(log(z)))
 
 #     Parameters
 #     ----------
-#     X : ndarray
-#         Matrix with column vectors (shape: d x n, where d is dimension and n is number of vectors).
-#     Y : ndarray, optional
-#         Matrix with column vectors (shape: d x m). Default is X.
-#     P : ndarray, optional
-#         Distance matrix (d x d). If given, computes distance under metric defined by P.
+#     x : ndarray
+#         Input signal (vector or matrix).
+#     gamma : float
+#         Regularization parameter (gamma >= 0).
+#     param : dict, optional
+#         Parameter dictionary with fields:
+#         - verbose: int, default 1
+#             0: no output
+#             1: print -sum(log(x))
+#             2: additionally report number of negative elements in x
 
 #     Returns
 #     -------
-#     D : ndarray
-#         Distance matrix of size (n x m), where D[i,j] = distance between X[:,i] and Y[:,j].
+#     sol : ndarray
+#         The solution.
+#     info : dict
+#         Dictionary containing:
+#         - 'algo': str, name of the algorithm
+#         - 'iter': int, number of iterations (here 0 since closed-form)
+#         - 'time': float, execution time
+#         - 'final_eval': float, final evaluation of the chosen measure
+#         - 'crit': str, stopping criterion (here '--')
 
 #     Notes
 #     -----
-#     This code computes:
-#         D = sqrt((X - Y)^T * P * (X - Y))
+#     If x contains non-positive values, the log is not defined. We will print
+#     a warning and set final_eval to inf in that case. This prevents NaN issues.
 
-#     If P is not provided, it assumes the standard Euclidean metric:
-#         D[i,j] = ||X[:,i] - Y[:,j]||_2
+#     The formula for the solution is:
+#         sol = (x + sqrt(x^2 + 4*gamma)) / 2.
 
-#     If Y is not provided, Y = X and the diagonal of D is set to zero.
+#     We keep consistency with the original MATLAB code by using -gamma*sum(log(x))
+#     as final_eval when possible.
 #     """
+#     if param is None:
+#         param = {}
+#     verbose = param.get('verbose', 1)
 
-#     if X is None:
-#         raise ValueError("Not enough input parameters: X must be provided")
+#     # Start timing
+#     t_start = time.time()
 
-#     # Default Y = X if not provided
-#     if Y is None:
-#         Y = X
+#     # Check gamma
+#     if gamma < 0:
+#         raise ValueError("Gamma cannot be negative.")
+#     elif gamma == 0:
+#         # If gamma=0, solution is x and final_eval=0
+#         sol = x
+#         info = {
+#             'algo': 'prox_sum_log',
+#             'iter': 0,
+#             'final_eval': 0,
+#             'crit': '--',
+#             'time': time.time() - t_start
+#         }
+#         return sol, info
 
-#     # Check dimensions
-#     rx, cx = X.shape
-#     ry, cy = Y.shape
+#     # Ensure x is a numpy array
+#     x = np.asarray(x, dtype=float)
 
-#     if rx != ry:
-#         raise ValueError("The sizes of X and Y do not match")
+#     # Compute the solution
+#     sol = (x + np.sqrt(x**2 + 4*gamma)) / 2.0
 
-#     # If P is not provided, use the standard Euclidean metric
-#     if P is None:
-#         # ||X||^2 for each vector in X
-#         xx = np.sum(X * X, axis=0)  # shape: (cx,)
-#         # ||Y||^2 for each vector in Y
-#         yy = np.sum(Y * Y, axis=0)  # shape: (cy,)
-#         # <X[:,i], Y[:,j]>
-#         xy = X.T @ Y  # shape: (cx, cy)
-
-#         # ||x - y||^2 = ||x||^2 + ||y||^2 - 2 <x,y>
-#         D = (xx[:, None] + yy[None, :] - 2 * xy)
+#     # Check for non-positive values in x
+#     if np.any(x <= 0):
+#         final_eval = np.inf
 #     else:
-#         # Check P dimensions
-#         rp, rp2 = P.shape
-#         if rx != rp:
-#             raise ValueError("The sizes of X and P do not match")
-#         if rp2 != rp:
-#             raise ValueError("P must be square")
+#         final_eval = -gamma * np.sum(np.log(x.ravel()))
 
-#         # x^T P x for each vector in X
-#         xx = np.sum(X * (P @ X), axis=0)  # shape: (cx,)
-#         # y^T P y for each vector in Y
-#         yy = np.sum(Y * (P @ Y), axis=0)  # shape: (cy,)
-#         # x^T P y
-#         xy = X.T @ (P @ Y)  # shape: (cx, cy)
-#         # y^T P x (transpose of the above)
-#         yx = Y.T @ (P @ X)  # shape: (cy, cx)
+#     # Prepare info dictionary
+#     info = {
+#         'algo': 'prox_sum_log',
+#         'iter': 0,
+#         'final_eval': final_eval,
+#         'crit': '--',
+#         'time': time.time() - t_start
+#     }
 
-#         D = (xx[:, None] + yy[None, :] - xy - yx.T)
+#     # Logging
+#     if verbose >= 1:
+#         if np.isinf(final_eval):
+#             msg = "  prox_sum_log: x contains non-positive values; - sum(log(x)) = inf"
+#         else:
+#             val_per_gamma = final_eval / gamma  # = -sum(log(x))
+#             msg = f"  prox_sum_log: - sum(log(x)) = {val_per_gamma:e}"
+#         if verbose > 1:
+#             # count negative elements
+#             n_neg = np.count_nonzero(x <= 0)
+#             if n_neg > 0:
+#                 msg += f" ({n_neg} negative or zero elements, log not defined, check stability)"
+#         print(msg)
 
-#     # Check for negative values due to potential numerical issues
-#     if np.any(D < 0):
-#         # This warning matches the MATLAB warning
-#         print("Warning: gsp_distanz: P is not semipositive or X is not real!")
+#     return sol, info
 
-#     # Take square root of distances
-#     D = np.sqrt(np.abs(D))
 
-#     # If Y = X, set diagonal to zero
-#     if Y is X:
-#         np.fill_diagonal(D, 0.0)
+
+def gsp_distanz(X, Y=None, P=None):
+    """
+    gsp_distanz calculates the distances between all vectors in X and Y.
+
+    Parameters
+    ----------
+    X : ndarray
+        Matrix with column vectors (shape: d x n, where d is dimension and n is number of vectors).
+    Y : ndarray, optional
+        Matrix with column vectors (shape: d x m). Default is X.
+    P : ndarray, optional
+        Distance matrix (d x d). If given, computes distance under metric defined by P.
+
+    Returns
+    -------
+    D : ndarray
+        Distance matrix of size (n x m), where D[i,j] = distance between X[:,i] and Y[:,j].
+
+    Notes
+    -----
+    This code computes:
+        D = sqrt((X - Y)^T * P * (X - Y))
+
+    If P is not provided, it assumes the standard Euclidean metric:
+        D[i,j] = ||X[:,i] - Y[:,j]||_2
+
+    If Y is not provided, Y = X and the diagonal of D is set to zero.
+    """
+
+    if X is None:
+        raise ValueError("Not enough input parameters: X must be provided")
+
+    # Default Y = X if not provided
+    if Y is None:
+        Y = X
+
+    # Check dimensions
+    rx, cx = X.shape
+    ry, cy = Y.shape
+
+    if rx != ry:
+        raise ValueError("The sizes of X and Y do not match")
+
+    # If P is not provided, use the standard Euclidean metric
+    if P is None:
+        # ||X||^2 for each vector in X
+        xx = np.sum(X * X, axis=0)  # shape: (cx,)
+        # ||Y||^2 for each vector in Y
+        yy = np.sum(Y * Y, axis=0)  # shape: (cy,)
+        # <X[:,i], Y[:,j]>
+        xy = X.T @ Y  # shape: (cx, cy)
+
+        # ||x - y||^2 = ||x||^2 + ||y||^2 - 2 <x,y>
+        D = (xx[:, None] + yy[None, :] - 2 * xy)
+    else:
+        # Check P dimensions
+        rp, rp2 = P.shape
+        if rx != rp:
+            raise ValueError("The sizes of X and P do not match")
+        if rp2 != rp:
+            raise ValueError("P must be square")
+
+        # x^T P x for each vector in X
+        xx = np.sum(X * (P @ X), axis=0)  # shape: (cx,)
+        # y^T P y for each vector in Y
+        yy = np.sum(Y * (P @ Y), axis=0)  # shape: (cy,)
+        # x^T P y
+        xy = X.T @ (P @ Y)  # shape: (cx, cy)
+        # y^T P x (transpose of the above)
+        yx = Y.T @ (P @ X)  # shape: (cy, cx)
+
+        D = (xx[:, None] + yy[None, :] - xy - yx.T)
+
+    # Check for negative values due to potential numerical issues
+    if np.any(D < 0):
+        # This warning matches the MATLAB warning
+        print("Warning: gsp_distanz: P is not semipositive or X is not real!")
+
+    # Take square root of distances
+    D = np.sqrt(np.abs(D))
+
+    # If Y = X, set diagonal to zero
+    if Y is X:
+        np.fill_diagonal(D, 0.0)
         
-#     # min_val = D.min()
-#     # if min_val < -1e-12:
-#     #     print("Warning: gsp_distanz: P is not semipositive or X is not real!")
-#     D = np.sqrt(np.maximum(D, 0)) 
+    # min_val = D.min()
+    # if min_val < -1e-12:
+    #     print("Warning: gsp_distanz: P is not semipositive or X is not real!")
+    D = np.sqrt(np.maximum(D, 0)) 
 
-#     return D
+    return D
 
 
 # def gsp_distanz(X, Y=None, P=None):
@@ -757,45 +826,132 @@ def prox_sum_log(x, gamma, param=None):
 
 #     return D
 
-def gsp_distanz(X, Y=None, P=None):
+# def gsp_distanz(X, Y=None, P=None):
+#     """
+#     Improved gsp_distanz that clamps values and adds a small epsilon.
+#     """
+#     if X is None:
+#         raise ValueError("Not enough input parameters: X must be provided")
+
+#     if Y is None:
+#         Y = X
+
+#     rx, cx = X.shape
+#     ry, cy = Y.shape
+#     if rx != ry:
+#         raise ValueError("The sizes of x and y do not fit!")
+
+#     if P is None:
+#         xx = np.sum(X*X, axis=0)
+#         yy = np.sum(Y*Y, axis=0)
+#         xy = X.T @ Y
+#         D = xx[:,None] + yy[None,:] - 2*xy
+#     else:
+#         rp, rp2 = P.shape
+#         if rx!=rp or rp!=rp2:
+#             raise ValueError("P must be square and match dimension of X")
+#         xx = np.sum(X*(P@X), axis=0)
+#         yy = np.sum(Y*(P@Y), axis=0)
+#         xy = X.T@(P@Y)
+#         yx = Y.T@(P@X)
+#         D = xx[:,None] + yy[None,:] - xy - yx.T
+
+#     # Add small eps before sqrt to avoid negative values due to round-off
+#     eps = 1e-14
+#     D = np.maximum(D, eps)
+
+#     # Check for negative values (unlikely now, but keep warning if needed)
+#     if np.any(D < 0):
+#         print("Warning: gsp_distanz: P is not semipositive or x is not real!")
+
+#     D = np.sqrt(D)
+#     if Y is X:
+#         np.fill_diagonal(D,0.0)
+#     return D
+
+
+
+
+def gsp_compute_graph_learning_theta(Z, k, geom_mean=0, is_sorted=0):
     """
-    Improved gsp_distanz that clamps values and adds a small epsilon.
+    Python equivalent of gsp_compute_graph_learning_theta.m
+    
+    Parameters
+    ----------
+    Z : ndarray (n x n)
+        Zero-diagonal pairwise distance matrix.
+    k : int
+        Desired sparsity level (number of neighbors/node).
+    geom_mean : int or bool, optional
+        If 0, use arithmetic mean. If 1, use geometric mean. Default: 0.
+    is_sorted : int or bool, optional
+        If 1, Z is already sorted. Default: 0.
+
+    Returns
+    -------
+    theta : float
+        Computed theta value for given k.
+    theta_min : float
+        Lower bound for this k.
+    theta_max : float
+        Upper bound for this k.
     """
-    if X is None:
-        raise ValueError("Not enough input parameters: X must be provided")
+    theta_min_arr, theta_max_arr, _ = gsp_compute_theta_bounds(Z, geom_mean, is_sorted)
 
-    if Y is None:
-        Y = X
+    # k indexing: In MATLAB, k is from 1 to n-1. 
+    # Ensure k indexing is consistent.
+    # In MATLAB code, it sets:
+    # theta_min = theta_min(k); theta_max = theta_max(k);
+    # arrays are zero-based in Python, so we use k-1 index:
+    theta_min = theta_min_arr[k-1]
+    theta_max = theta_max_arr[k-1]
 
-    rx, cx = X.shape
-    ry, cy = Y.shape
-    if rx != ry:
-        raise ValueError("The sizes of x and y do not fit!")
-
-    if P is None:
-        xx = np.sum(X*X, axis=0)
-        yy = np.sum(Y*Y, axis=0)
-        xy = X.T @ Y
-        D = xx[:,None] + yy[None,:] - 2*xy
+    if k > 1:
+        theta = np.sqrt(theta_min * theta_max)
     else:
-        rp, rp2 = P.shape
-        if rx!=rp or rp!=rp2:
-            raise ValueError("P must be square and match dimension of X")
-        xx = np.sum(X*(P@X), axis=0)
-        yy = np.sum(Y*(P@Y), axis=0)
-        xy = X.T@(P@Y)
-        yx = Y.T@(P@X)
-        D = xx[:,None] + yy[None,:] - xy - yx.T
+        # if k=1, theta = theta_min * 1.1
+        # Replicate MATLAB logic
+        theta = theta_min * 1.1
 
-    # Add small eps before sqrt to avoid negative values due to round-off
-    eps = 1e-14
-    D = np.maximum(D, eps)
+    return theta
 
-    # Check for negative values (unlikely now, but keep warning if needed)
-    if np.any(D < 0):
-        print("Warning: gsp_distanz: P is not semipositive or x is not real!")
 
-    D = np.sqrt(D)
-    if Y is X:
-        np.fill_diagonal(D,0.0)
-    return D
+def gsp_symmetrize(W, sym_type='full'):
+    """
+    Python equivalent of gsp_symmetrize.m that handles both dense and sparse matrices.
+    
+    Parameters
+    ----------
+    W : ndarray or scipy.sparse matrix
+        Square matrix to be symmetrized.
+    sym_type : str, optional
+        Type of symmetrization. Options are:
+        - 'average': average of W and W.T ( (W+W.T)/2 )
+        - 'full':    copy missing entries ( W = max(W, W.T) )
+        - 'none':    do nothing
+        Default is 'full'.
+    
+    Returns
+    -------
+    W_sym : ndarray or scipy.sparse matrix
+        Symmetrized matrix.
+    """
+    if issparse(W):
+        if sym_type == 'average':
+            W_sym = (W + W.transpose()) * 0.5
+        elif sym_type in ['full', 'maximum']:
+            W_sym = W.maximum(W.transpose())
+        elif sym_type == 'none':
+            W_sym = W
+        else:
+            raise ValueError(f"gsp_symmetrize: Unknown type '{sym_type}'")
+    else:
+        if sym_type == 'average':
+            W_sym = (W + W.T) / 2.0
+        elif sym_type in ['full', 'maximum']:
+            W_sym = np.maximum(W, W.T)
+        elif sym_type == 'none':
+            W_sym = W
+        else:
+            raise ValueError(f"gsp_symmetrize: Unknown type '{sym_type}'")
+    return W_sym
